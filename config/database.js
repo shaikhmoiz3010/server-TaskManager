@@ -5,40 +5,26 @@ dotenv.config();
 
 const connectDB = async () => {
   try {
-    const conn = await mongoose.connect(process.env.MONGODB_URI, {
+    // Don't connect immediately in serverless environment
+    if (mongoose.connection.readyState >= 1) {
+      return;
+    }
+
+    await mongoose.connect(process.env.MONGODB_URI, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
-      serverSelectionTimeoutMS: 5000,
-      socketTimeoutMS: 45000,
+      maxPoolSize: 10, // Important for serverless
     });
     
-    console.log(`MongoDB Connected: ${conn.connection.host}`);
-    
-    // Handle connection events
-    mongoose.connection.on('error', err => {
-      console.error('MongoDB connection error:', err);
-    });
-    
-    mongoose.connection.on('disconnected', () => {
-      console.log('MongoDB disconnected');
-    });
-    
-    // Graceful shutdown
-    process.on('SIGINT', async () => {
-      await mongoose.connection.close();
-      console.log('MongoDB connection closed through app termination');
-      process.exit(0);
-    });
+    console.log(`✅ MongoDB Connected`);
     
   } catch (error) {
-    console.error('MongoDB connection error:', error);
-    
-    // Retry logic for production
+    console.error('❌ MongoDB connection error:', error.message);
+    // Don't throw error in production, just log it
     if (process.env.NODE_ENV === 'production') {
-      console.log('Retrying connection in 5 seconds...');
-      setTimeout(connectDB, 5000);
+      console.log('Continuing without MongoDB connection');
     } else {
-      process.exit(1);
+      throw error;
     }
   }
 };
