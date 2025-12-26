@@ -3,21 +3,33 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+// Connection cache for serverless environments
+let cachedConnection = null;
+
 const connectDB = async () => {
   try {
-    // Don't connect immediately in serverless environment
-    if (mongoose.connection.readyState >= 1) {
-      return;
+    // Return cached connection if available
+    if (cachedConnection) {
+      return cachedConnection;
     }
 
-    await mongoose.connect(process.env.MONGODB_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
+    // Don't connect immediately in serverless environment
+    if (mongoose.connection.readyState >= 1) {
+      cachedConnection = mongoose.connection;
+      return cachedConnection;
+    }
+
+    // Remove deprecated options
+    const conn = await mongoose.connect(process.env.MONGODB_URI, {
       maxPoolSize: 10, // Important for serverless
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
     });
     
-    console.log(`✅ MongoDB Connected`);
+    cachedConnection = conn;
+    console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
     
+    return conn;
   } catch (error) {
     console.error('❌ MongoDB connection error:', error.message);
     // Don't throw error in production, just log it

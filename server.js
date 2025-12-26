@@ -8,75 +8,141 @@ import dotenv from 'dotenv';
 
 import connectDB from './config/database.js';
 import errorHandler from './middleware/errorHandler.js';
-import routes from './routes/index.js';
+import router from './routes/index.js';
 
-// Load environment variables FIRST
+
 dotenv.config();
 
 const app = express();
 
-// Connect to MongoDB - but handle errors gracefully
-if (process.env.NODE_ENV !== 'development') {
-  // In production (Vercel), we need to handle MongoDB connection differently
-  mongoose.connect(process.env.MONGODB_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-  }).then(() => {
-    console.log('✅ MongoDB Connected to Vercel');
-  }).catch(err => {
-    console.error('❌ MongoDB connection error on Vercel:', err.message);
-    // Don't crash the app, continue without DB (for testing)
-  });
-}
-
-// CORS configuration - SIMPLIFIED for Vercel
-app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'https://your-frontend.vercel.app', // Add your frontend URL
-  ],
-  credentials: true,
-}));
+// Connect to MongoDB
+connectDB();
 
 // Security middleware
 app.use(helmet({
-  crossOriginResourcePolicy: false, // Important for Vercel
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+    },
+  },
 }));
+
+// CORS configuration
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  // Add your frontend URLs here
+  process.env.FRONTEND_URL,
+].filter(Boolean);
+
+console.log('🔧 Allowed CORS origins:', allowedOrigins);
+
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+
+    // Allow all origins in development
+    if (process.env.NODE_ENV === 'development') {
+      return callback(null, true);
+    }
+
+    if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+      return callback(null, true);
+    }
+
+    console.log('❌ CORS blocked origin:', origin);
+    const msg = `The CORS policy for this site does not allow access from the origin: ${origin}`;
+    return callback(new Error(msg), false);
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range']
+}));
+
+// Handle preflight requests
+app.options('*', cors());
 
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100,
-  message: 'Too many requests from this IP',
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: process.env.NODE_ENV === 'production' ? 100 : 1000, // limit each IP
+  message: {
+    success: false,
+    error: 'Too many requests from this IP, please try again later.'
+  },
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
 });
+
 app.use('/api/', limiter);
 
-// Logging
-app.use(morgan('dev'));
+// Logging middleware
+app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 
-// Body parsing
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Body parsing middleware
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Request logging middleware (custom)
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+  next();
+});
 
 // Routes
-app.use('/api', routes);
+app.use('/api', router);
 
-// Health check endpoint (NO DB CHECK for now)
-app.get('/api/health', (req, res) => {
-  res.json({ 
+// Health check endpoint
+app.get('/api/health', async (req, res) => {
+  const dbStatus = mongoose.connection.readyState;
+  const dbStatusText = {
+    0: 'disconnected',
+    1: 'connected',
+    2: 'connecting',
+    3: 'disconnecting'
+  }[dbStatus] || 'unknown';
+
+  res.status(200).json({
     success: true,
-    status: 'OK', 
+    status: 'OK',
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'production',
+    environment: process.env.NODE_ENV || 'development',
+    database: {
+      status: dbStatusText,
+      host: mongoose.connection.host,
+      name: mongoose.connection.name
+    },
+    uptime: process.uptime(),
+    memory: process.memoryUsage()
   });
 });
 
-// Test endpoint
-app.get('/api/test', (req, res) => {
-  res.json({ 
+// API documentation endpoint
+app.get('/api', (req, res) => {
+  res.json({
     success: true,
-    message: 'API is working on Vercel!',
-    timestamp: new Date().toISOString()
+    message: 'Task Manager API v1.0',
+    documentation: {
+      auth: {
+        register: 'POST /api/auth/register',
+        login: 'POST /api/auth/login',
+        getCurrentUser: 'GET /api/auth/me'
+      },
+      tasks: {
+        getAll: 'GET /api/tasks',
+        getOne: 'GET /api/tasks/:id',
+        create: 'POST /api/tasks',
+        update: 'PUT /api/tasks/:id',
+        delete: 'DELETE /api/tasks/:id'
+      },
+      health: 'GET /api/health'
+    },
+    status: 'operational'
   });
 });
 
@@ -84,10 +150,12 @@ app.get('/api/test', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     success: true,
-    message: 'Task Manager Backend API',
+    message: '🚀 Task Manager Backend API',
     version: '1.0.0',
+    environment: process.env.NODE_ENV || 'development',
+    timestamp: new Date().toISOString(),
     endpoints: {
-      test: '/api/test',
+      api: '/api',
       health: '/api/health',
       auth: '/api/auth',
       tasks: '/api/tasks'
@@ -95,16 +163,55 @@ app.get('/', (req, res) => {
   });
 });
 
-// Error handling
+// Error handling middleware (must be last)
 app.use(errorHandler);
 
-// 404 handler
+// 404 handler - catch all other routes
 app.use('*', (req, res) => {
-  res.status(404).json({ 
+  res.status(404).json({
     success: false,
-    message: 'Route not found'
+    message: `Route not found: ${req.originalUrl}`,
+    suggestion: 'Check /api for available endpoints'
   });
 });
 
-// Vercel expects a default export
+// Export the app for Vercel
 export default app;
+
+// Check if this file is being run directly
+const isMainModule = import.meta.url === `file://${process.argv[1]}`;
+
+if (isMainModule || process.env.NODE_ENV === 'development') {
+  const PORT = process.env.PORT || 5000;
+  const server = app.listen(PORT, () => {
+    console.log('\n' + '='.repeat(50));
+    console.log(`✅ Server running on port ${PORT}`);
+    console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`📅 Started at: ${new Date().toISOString()}`);
+    console.log(`📚 API Documentation: http://localhost:${PORT}`);
+    console.log(`🩺 Health check: http://localhost:${PORT}/api/health`);
+    console.log('='.repeat(50) + '\n');
+  });
+
+  // Graceful shutdown
+  const signals = ['SIGINT', 'SIGTERM', 'SIGQUIT'];
+
+  signals.forEach(signal => {
+    process.on(signal, () => {
+      console.log(`\n${signal} received. Closing server gracefully...`);
+      server.close(() => {
+        console.log('Server closed.');
+        // Mongoose v8 uses Promises instead of callbacks
+        mongoose.connection.close()
+          .then(() => {
+            console.log('MongoDB connection closed.');
+            process.exit(0);
+          })
+          .catch(err => {
+            console.error('Error closing MongoDB connection:', err);
+            process.exit(1);
+          });
+      });
+    });
+  });
+}
